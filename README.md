@@ -1,4 +1,4 @@
-# Gomoku LAN (Python 3.12)
+# WoozchLAN (Python 3.12)
 
 一个基于 Tkinter 的局域网 P2P 五子棋桌面应用：即开即用、无需第三方依赖，同网段自动发现并建立点对点连接完成房间与对局同步。
 
