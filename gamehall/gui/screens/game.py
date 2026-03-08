@@ -378,10 +378,49 @@ class GameScreen(ttk.Frame):
         else:
             title = f"胜者：{name(winner_peer_id)}"
         ttk.Label(body, text=title, style="Title.TLabel").pack(anchor=tk.W)
-        ttk.Label(body, text="你可以返回大厅。", style="Hint.TLabel").pack(anchor=tk.W, pady=(8, 14))
+        
+        # 根据角色显示不同提示
+        is_host = self.role == "host"
+        is_player = self.role in ("host", "player2")
+        if is_host:
+            hint_text = "你可以选择再来一局或返回大厅。"
+        elif self.role == "player2":
+            hint_text = "你可以选择再来一局（需重新准备）或返回大厅。"
+        else:
+            hint_text = "你可以返回大厅。"
+        ttk.Label(body, text=hint_text, style="Hint.TLabel").pack(anchor=tk.W, pady=(8, 14))
 
         btns = ttk.Frame(body, style="Card.TFrame")
         btns.pack(fill=tk.X)
+
+        def back_to_lobby() -> None:
+            """返回大厅"""
+            win.destroy()
+            self._back()
+
+        def play_again() -> None:
+            """再来一局"""
+            win.destroy()
+            room_id = self.room_id
+            if not room_id:
+                return
+            if is_host:
+                # 房主：重置游戏状态，等待玩家准备
+                self.app.core.reset_game(room_id)
+            else:
+                # 玩家2：重置本地准备状态，等待房主开始
+                self._ready_state = False
+                if hasattr(self.app, "_sync_game_header_actions"):
+                    try:
+                        getattr(self.app, "_sync_game_header_actions")()
+                    except Exception:
+                        pass
+
+        # 玩家（房主和玩家2）显示两个按钮，观战者只显示返回大厅
+        if is_player:
+            ttk.Button(btns, text="再来一局", style="Primary.TButton", command=play_again).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(btns, text="返回大厅", command=back_to_lobby).pack(side=tk.RIGHT)
+
         win.update_idletasks()
         root = self.winfo_toplevel()
         root.update_idletasks()
@@ -394,9 +433,3 @@ class GameScreen(ttk.Frame):
         x = root_x + (root_width - width) // 2
         y = root_y + (root_height - height) // 2
         win.geometry(f"{width}x{height}+{x}+{y}")
-
-        def back() -> None:
-            win.destroy()
-            self._back()
-
-        ttk.Button(btns, text="返回大厅", command=back).pack(side=tk.RIGHT)

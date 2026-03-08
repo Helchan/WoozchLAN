@@ -264,6 +264,20 @@ class LobbyScreen(ttk.Frame):
         ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="创建", style="Primary.TButton", command=ok).pack(side=tk.RIGHT, padx=(0, 10))
 
+        # 居中显示弹窗
+        win.update_idletasks()
+        root = self.winfo_toplevel()
+        root.update_idletasks()
+        width = win.winfo_width()
+        height = win.winfo_height()
+        root_width = root.winfo_width()
+        root_height = root.winfo_height()
+        root_x = root.winfo_rootx()
+        root_y = root.winfo_rooty()
+        x = root_x + (root_width - width) // 2
+        y = root_y + (root_height - height) // 2
+        win.geometry(f"{width}x{height}+{x}+{y}")
+
     def _on_double_click(self, _e: tk.Event) -> None:
         rid = self._selected_room_id()
         if not rid:
