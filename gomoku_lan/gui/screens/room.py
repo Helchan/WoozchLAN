@@ -82,7 +82,7 @@ class RoomScreen(ttk.Frame):
         self.ready_btn = ttk.Button(right, text="准备", style="Primary.TButton", command=self._toggle_ready)
         self.ready_btn.pack(fill=tk.X, padx=14, pady=(0, 10))
 
-        self.start_btn = ttk.Button(right, text="开始对弈", style="Primary.TButton", command=self._start)
+        self.start_btn = ttk.Button(right, text="开始对战", style="Primary.TButton", command=self._start)
         self.start_btn.pack(fill=tk.X, padx=14, pady=(0, 10))
 
         self.reset_btn = ttk.Button(right, text="再来一局", command=self._reset)
@@ -197,9 +197,9 @@ class RoomScreen(ttk.Frame):
         if self.role == "spectator":
             self.note.configure(text="你正在观战。若想对战，请在大厅加入等待中的房间。")
         elif self.role == "player2":
-            self.note.configure(text="点击准备后等待房主开始对弈。")
+            self.note.configure(text="点击准备后等待房主开始对战。")
         else:
-            self.note.configure(text="对手准备后即可开始对弈。")
+            self.note.configure(text="对手准备后即可开始对战。")
 
     def _toggle_ready(self) -> None:
         if not self.room_id:

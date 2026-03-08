@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, replace
-import random
 from typing import Any, Callable
 
-from .model.game import BOARD_SIZE, GameState, check_winner
+from .game import GameRegistry, GomokuState, BOARD_SIZE
 from .model.room import RoomHostState, RoomSummary
 from .net.node import Node, NodeConfig, NodeEvent
 from .util import new_id, now_ms
@@ -74,13 +73,12 @@ class Core:
         with self._lock:
             self._known_nicknames[peer_id] = nick
             for rid, st in self._host_rooms.items():
-                if peer_id != st.host_peer_id and peer_id != st.player2_peer_id and peer_id not in st.spectators:
+                # 检查玩家是否在房间内
+                if peer_id not in st.team_a and peer_id not in st.team_b and peer_id not in st.spectators:
                     continue
                 st.nicknames[peer_id] = nick
                 if peer_id == st.host_peer_id:
                     st.host_nickname = nick
-                if peer_id == st.player2_peer_id:
-                    st.player2_nickname = nick
                 st.updated_ms = now
                 host_room_ids.append(rid)
             for rid, summary in list(self.rooms.items()):
@@ -88,9 +86,6 @@ class Core:
                 updated = summary
                 if summary.host_peer_id == peer_id and summary.host_nickname != nick:
                     updated = replace(updated, host_nickname=nick, updated_ms=max(updated.updated_ms, now))
-                    changed = True
-                if summary.player2_peer_id == peer_id and (summary.player2_nickname or "") != nick:
-                    updated = replace(updated, player2_nickname=nick, updated_ms=max(updated.updated_ms, now))
                     changed = True
                 if changed:
                     self.rooms[rid] = updated
@@ -110,8 +105,15 @@ class Core:
         assert self.node.listen_addr is not None
         room_id = f"{self.peer_id[:8]}-{new_id()[:10]}"
         game_key = game.strip().lower() if isinstance(game, str) else "gomoku"
-        if game_key != "gomoku":
+        
+        # 从 GameRegistry 获取游戏配置
+        handler = GameRegistry.get_handler(game_key)
+        if handler is None:
             game_key = "gomoku"
+            handler = GameRegistry.get_handler(game_key)
+        config = handler.get_config() if handler else None
+        team_size = config.team_size if config else 1
+        
         st = RoomHostState(
             room_id=room_id,
             name=name.strip() or "房间",
@@ -120,6 +122,7 @@ class Core:
             host_ip=self.node.local_ip,
             host_port=self.node.listen_addr.port,
             game=game_key,
+            team_size=team_size,
             created_ms=now_ms(),
             updated_ms=now_ms(),
         )
@@ -181,36 +184,55 @@ class Core:
         if st is None:
             return
 
-        if not st.player2_peer_id:
-            return
-        if not st.ready.get(st.player2_peer_id):
+        # 使用新的 can_start_game 方法检查
+        if not st.can_start_game():
             return
 
         st.status = "playing"
         st.updated_ms = now_ms()
         self._announce_room(room_id)
 
-        host = st.host_peer_id
-        p2 = st.player2_peer_id
-        black, white = (host, p2) if random.random() < 0.5 else (p2, host)
-        game = GameState.new(next_peer_id=black)
+        # 使用 GameHandler 创建游戏状态
+        handler = GameRegistry.get_handler(st.game)
+        if handler is None:
+            return
+        
+        game_state = handler.create_game_state(st.team_a, st.team_b)
         with self._lock:
-            self._games[room_id] = game
-            self._colors[room_id] = {black: 1, white: 2}
+            self._games[room_id] = game_state
+            # 保存 colors 以便兼容
+            if hasattr(game_state, 'colors') and game_state.colors:
+                self._colors[room_id] = game_state.colors
 
-        self._broadcast_room(room_id, {"type": "game_start", "room_id": room_id, "black_peer_id": black, "white_peer_id": white, "board_size": BOARD_SIZE, "next_peer_id": game.next_peer_id})
+        # 广播游戏开始
+        broadcast_state = handler.get_state_for_broadcast(game_state)
+        self._broadcast_room(room_id, {
+            "type": "game_start",
+            "room_id": room_id,
+            "black_peer_id": broadcast_state.get("black_peer_id"),
+            "white_peer_id": broadcast_state.get("white_peer_id"),
+            "board_size": broadcast_state.get("board_size", BOARD_SIZE),
+            "next_peer_id": broadcast_state.get("next_peer_id"),
+        })
         self._broadcast_game_state(room_id)
-        self._emit("game_started", {"room_id": room_id, "black_peer_id": black, "white_peer_id": white, "next_peer_id": game.next_peer_id})
+        self._emit("game_started", {
+            "room_id": room_id,
+            "black_peer_id": broadcast_state.get("black_peer_id"),
+            "white_peer_id": broadcast_state.get("white_peer_id"),
+            "next_peer_id": broadcast_state.get("next_peer_id"),
+        })
 
     def reset_game(self, room_id: str) -> None:
         with self._lock:
             st = self._host_rooms.get(room_id)
         if st is None:
             return
-        if not st.player2_peer_id:
+        if not st.team_b:
             return
         st.status = "waiting"
-        st.ready[st.player2_peer_id] = False
+        # 重置 B 方所有成员的准备状态
+        for pid in st.team_b:
+            st.ready[pid] = False
         st.updated_ms = now_ms()
         with self._lock:
             self._games.pop(room_id, None)
@@ -308,13 +330,15 @@ class Core:
             return
         if mtype == "room_close":
             room_id = str(msg.get("room_id", ""))
+            message = str(msg.get("message", "")) or "房间已关闭"
             if room_id:
                 with self._lock:
                     self.rooms.pop(room_id, None)
                 self._emit("rooms", {})
                 if self._active_room_id == room_id:
                     self._active_room_id = None
-                    self._emit("room_left", {"room_id": room_id, "forced": True})
+                    # 显示弹窗提醒，然后返回大厅
+                    self._emit("room_closed_alert", {"room_id": room_id, "message": message})
             return
         if mtype == "room_join":
             self._handle_room_join(msg)
@@ -364,8 +388,9 @@ class Core:
                 host_ip=str(room.get("host_ip", "")),
                 host_port=int(room.get("host_port", 0) or 0),
                 status=str(room.get("status", "waiting")),
-                player2_peer_id=(str(room.get("player2_peer_id")) if room.get("player2_peer_id") else None),
-                player2_nickname=(str(room.get("player2_nickname")) if room.get("player2_nickname") else None),
+                team_a_count=int(room.get("team_a_count", 1) or 1),
+                team_b_count=int(room.get("team_b_count", 0) or 0),
+                team_size=int(room.get("team_size", 1) or 1),
                 players=int(room.get("players", 1) or 1),
                 spectators=int(room.get("spectators", 0) or 0),
                 updated_ms=int(room.get("updated_ms", 0) or 0),
@@ -380,8 +405,6 @@ class Core:
         with self._lock:
             if summary.host_peer_id and summary.host_nickname:
                 self._known_nicknames[summary.host_peer_id] = summary.host_nickname
-            if summary.player2_peer_id and summary.player2_nickname:
-                self._known_nicknames[summary.player2_peer_id] = summary.player2_nickname
         self._upsert_room(summary)
 
     def _upsert_room(self, summary: RoomSummary) -> None:
@@ -417,18 +440,19 @@ class Core:
             if st.status != "waiting":
                 ok = False
                 reason = "对战中仅可观战"
-            elif st.player2_peer_id and st.player2_peer_id != peer_id:
+            elif st.is_team_b_full():
                 ok = False
                 reason = "房间已满"
             else:
-                st.player2_peer_id = peer_id
-                st.player2_nickname = nickname
+                # 加入 B 方
+                if peer_id not in st.team_b:
+                    st.team_b.append(peer_id)
                 role = "player2"
                 st.ready.setdefault(peer_id, False)
         else:
-            if st.status == "waiting" and not st.player2_peer_id:
+            if st.status == "waiting" and not st.is_team_b_full():
                 ok = False
-                reason = "二缺一时只能加入对战"
+                reason = "缺人时只能加入对战"
             else:
                 st.spectators.add(peer_id)
 
@@ -453,9 +477,9 @@ class Core:
             with self._lock:
                 colors = self._colors.get(room_id)
                 game = self._games.get(room_id)
-            if colors and game and st.player2_peer_id:
+            if colors and game and st.team_b:
                 black = next((pid for pid, c in colors.items() if c == 1), st.host_peer_id)
-                white = next((pid for pid, c in colors.items() if c == 2), st.player2_peer_id)
+                white = next((pid for pid, c in colors.items() if c == 2), st.team_b[0] if st.team_b else "")
                 self.node.send_to_peer(
                     peer_id,
                     {
@@ -464,21 +488,24 @@ class Core:
                         "black_peer_id": black,
                         "white_peer_id": white,
                         "board_size": BOARD_SIZE,
-                        "next_peer_id": game.next_peer_id,
+                        "next_peer_id": getattr(game, 'next_peer_id', black),
                     },
                 )
-                flat = [cell for row in game.board for cell in row]
-                self.node.send_to_peer(
-                    peer_id,
-                    {
-                        "type": "game_state",
-                        "room_id": room_id,
-                        "board": flat,
-                        "next_peer_id": game.next_peer_id,
-                        "winner_peer_id": game.winner_peer_id,
-                        "last_move": list(game.last_move) if game.last_move else None,
-                    },
-                )
+                # 获取广播状态
+                handler = GameRegistry.get_handler(st.game)
+                if handler:
+                    broadcast_state = handler.get_state_for_broadcast(game)
+                    self.node.send_to_peer(
+                        peer_id,
+                        {
+                            "type": "game_state",
+                            "room_id": room_id,
+                            "board": broadcast_state.get("board", []),
+                            "next_peer_id": broadcast_state.get("next_peer_id"),
+                            "winner_peer_id": broadcast_state.get("winner_peer_id"),
+                            "last_move": broadcast_state.get("last_move"),
+                        },
+                    )
 
     def _handle_room_join_result(self, msg: dict[str, Any]) -> None:
         room_id = str(msg.get("room_id", ""))
@@ -490,6 +517,13 @@ class Core:
             return
         role = str(msg.get("role", "spectator"))
         status = str(msg.get("status", ""))
+        
+        # 如果房间状态是 waiting，清理本地游戏状态（防止显示旧棋盘）
+        if status == "waiting":
+            with self._lock:
+                self._games.pop(room_id, None)
+                self._colors.pop(room_id, None)
+        
         with self._lock:
             self._active_room_id = room_id
         payload: dict[str, Any] = {"room_id": room_id, "role": role, "participants": msg.get("participants")}
@@ -506,14 +540,47 @@ class Core:
             st = self._host_rooms.get(room_id)
         if st is None:
             return
-        if peer_id == st.player2_peer_id:
-            st.player2_peer_id = None
-            st.player2_nickname = None
-        st.spectators.discard(peer_id)
-        st.ready.pop(peer_id, None)
-        st.nicknames.pop(peer_id, None)
+
+        was_in_team_b = peer_id in st.team_b
+        was_playing = st.status == "playing"
+        left_nickname = st.nicknames.get(peer_id, peer_id[:6])
+
+        # 使用 RoomHostState 的 remove_player 方法
+        st.remove_player(peer_id)
+
+        # 检查 B 方是否全部退出
+        team_b_empty = len(st.team_b) == 0
+        should_show_alert = False
+        alert_message = ""
+        
+        if was_in_team_b and team_b_empty:
+            # 如果对战中，重置游戏状态
+            if was_playing:
+                st.status = "waiting"
+                with self._lock:
+                    self._games.pop(room_id, None)
+                    self._colors.pop(room_id, None)
+                should_show_alert = True
+                alert_message = f"对手 {left_nickname} 已退出，游戏结束"
+            else:
+                # 等待中，B 方全部退出
+                self._emit("toast", {"text": f"玩家 {left_nickname} 已退出"})
+
         st.updated_ms = now_ms()
         self._announce_room(room_id)
+
+        # 先广播新的房间状态（确保 participants 更新）
+        parts = st.participants()
+        self._broadcast_room(room_id, {"type": "room_state", "room_id": room_id, "participants": parts})
+        self._emit("room_state", {"room_id": room_id, "participants": parts})
+        
+        # 然后再显示弹窗和刷新游戏状态
+        if should_show_alert:
+            self._emit("game_state", {"room_id": room_id})  # 触发 UI 刷新
+            self._emit("opponent_left_alert", {
+                "room_id": room_id,
+                "message": alert_message,
+            })
 
     def _handle_room_ready(self, msg: dict[str, Any]) -> None:
         room_id = str(msg.get("room_id", ""))
@@ -525,7 +592,8 @@ class Core:
             st = self._host_rooms.get(room_id)
         if st is None:
             return
-        if peer_id != st.player2_peer_id:
+        # 只有 B 方成员可以准备
+        if peer_id not in st.team_b:
             return
         st.ready[peer_id] = ready
         st.updated_ms = now_ms()
@@ -552,41 +620,46 @@ class Core:
         with self._lock:
             st = self._host_rooms.get(room_id)
             game = self._games.get(room_id)
-            colors = self._colors.get(room_id)
-        if st is None or game is None or colors is None:
+        if st is None or game is None:
             return
-        if st.status != "playing" or game.winner_peer_id is not None:
+        if st.status != "playing":
             return
-        if peer_id != game.next_peer_id:
+        
+        # 使用 GameHandler 处理操作
+        handler = GameRegistry.get_handler(st.game)
+        if handler is None:
             return
-        if not game.can_place(x, y):
+        
+        # 检查游戏是否已结束
+        game_over, _ = handler.check_game_over(game, st.team_a, st.team_b)
+        if game_over:
             return
-        color = colors.get(peer_id)
-        if color not in (1, 2):
+        
+        # 应用操作
+        action = {"x": x, "y": y}
+        game, success = handler.apply_action(game, peer_id, action)
+        if not success:
             return
-
-        game.board[y][x] = color
-        game.last_move = (x, y, color)
-
-        win_color = check_winner(game.board, x, y)
-        if win_color:
-            winner_peer_id = next((pid for pid, c in colors.items() if c == win_color), None)
-            if winner_peer_id:
-                game.winner_peer_id = winner_peer_id
-            else:
-                game.winner_peer_id = peer_id
-
+        
+        with self._lock:
+            self._games[room_id] = game
+            # 更新 colors
+            if hasattr(game, 'colors') and game.colors:
+                self._colors[room_id] = game.colors
+        
+        # 检查游戏是否结束
+        game_over, winner_team = handler.check_game_over(game, st.team_a, st.team_b)
+        if game_over:
             st.status = "waiting"
-            if st.player2_peer_id:
-                st.ready[st.player2_peer_id] = False
+            # 重置 B 方准备状态
+            for pid in st.team_b:
+                st.ready[pid] = False
             st.updated_ms = now_ms()
             self._announce_room(room_id)
             parts = st.participants()
             self._broadcast_room(room_id, {"type": "room_state", "room_id": room_id, "participants": parts})
             self._emit("room_state", {"room_id": room_id, "participants": parts})
-        else:
-            other = st.player2_peer_id if peer_id == st.host_peer_id else st.host_peer_id
-            game.next_peer_id = other or st.host_peer_id
+        
         self._broadcast_game_state(room_id)
 
     def _handle_game_start(self, msg: dict[str, Any]) -> None:
@@ -596,7 +669,8 @@ class Core:
         black = str(msg.get("black_peer_id", ""))
         white = str(msg.get("white_peer_id", ""))
         next_peer_id = str(msg.get("next_peer_id", black))
-        game = GameState.new(next_peer_id=next_peer_id)
+        game = GomokuState.new(next_peer_id=next_peer_id)
+        game.colors = {black: 1, white: 2}
         with self._lock:
             self._games[room_id] = game
             self._colors[room_id] = {black: 1, white: 2}
@@ -615,7 +689,7 @@ class Core:
             room = self.rooms.get(room_id)
 
         if st is not None:
-            allowed = peer_id == st.host_peer_id or peer_id == st.player2_peer_id or peer_id in st.spectators
+            allowed = peer_id in st.team_a or peer_id in st.team_b or peer_id in st.spectators
             if not allowed:
                 return
             st.nicknames[peer_id] = nickname
@@ -633,18 +707,26 @@ class Core:
     def _broadcast_game_state(self, room_id: str) -> None:
         with self._lock:
             game = self._games.get(room_id)
+            st = self._host_rooms.get(room_id)
         if game is None:
             return
-        flat = [cell for row in game.board for cell in row]
+        
+        # 使用 GameHandler 获取广播状态
+        game_name = st.game if st else "gomoku"
+        handler = GameRegistry.get_handler(game_name)
+        if handler is None:
+            return
+        
+        broadcast_state = handler.get_state_for_broadcast(game)
         self._broadcast_room(
             room_id,
             {
                 "type": "game_state",
                 "room_id": room_id,
-                "board": flat,
-                "next_peer_id": game.next_peer_id,
-                "winner_peer_id": game.winner_peer_id,
-                "last_move": list(game.last_move) if game.last_move else None,
+                "board": broadcast_state.get("board", []),
+                "next_peer_id": broadcast_state.get("next_peer_id"),
+                "winner_peer_id": broadcast_state.get("winner_peer_id"),
+                "last_move": broadcast_state.get("last_move"),
             },
         )
         self._emit("game_state", {"room_id": room_id})
@@ -656,7 +738,7 @@ class Core:
             return
         next_peer_id = str(msg.get("next_peer_id", ""))
         winner = str(msg.get("winner_peer_id")) if msg.get("winner_peer_id") else None
-        game = GameState.new(next_peer_id=next_peer_id)
+        game = GomokuState.new(next_peer_id=next_peer_id)
         for i, v in enumerate(board):
             y, x = divmod(i, BOARD_SIZE)
             try:
@@ -670,7 +752,11 @@ class Core:
                 game.last_move = (int(lm[0]), int(lm[1]), int(lm[2]))
             except Exception:
                 pass
+        # 从 _colors 恢复颜色信息
         with self._lock:
+            colors = self._colors.get(room_id)
+            if colors:
+                game.colors = colors
             self._games[room_id] = game
         self._emit("game_state", {"room_id": room_id})
 
@@ -689,8 +775,6 @@ class Core:
         if st is None:
             return
         st.host_nickname = self._known_nicknames.get(st.host_peer_id, st.host_nickname) or st.host_nickname
-        if st.player2_peer_id:
-            st.player2_nickname = self._known_nicknames.get(st.player2_peer_id, st.player2_nickname or "玩家")
         summary = st.summary()
         self._upsert_room(summary)
         self.node.broadcast({"type": "room_announce", "room": summary.__dict__})
@@ -700,10 +784,8 @@ class Core:
             st = self._host_rooms.get(room_id)
         if st is None:
             return
-        targets = [st.host_peer_id]
-        if st.player2_peer_id:
-            targets.append(st.player2_peer_id)
-        targets.extend(list(st.spectators))
+        # 收集所有参与者
+        targets = list(st.team_a) + list(st.team_b) + list(st.spectators)
         for pid in targets:
             if pid == self.peer_id:
                 continue
@@ -711,13 +793,42 @@ class Core:
 
     def _close_host_room(self, room_id: str) -> None:
         with self._lock:
-            st = self._host_rooms.pop(room_id, None)
+            st = self._host_rooms.get(room_id)
+        if st is None:
+            with self._lock:
+                self._host_rooms.pop(room_id, None)
+                self.rooms.pop(room_id, None)
+                self._games.pop(room_id, None)
+                self._colors.pop(room_id, None)
+            self._emit("rooms", {})
+            self._emit("room_left", {"room_id": room_id, "host_closed": True})
+            return
+
+        # 通知房间内所有人（B方玩家和观战者）房间已关闭
+        targets = list(st.team_b) + list(st.spectators)
+
+        for pid in targets:
+            self.node.send_to_peer(pid, {
+                "type": "room_close",
+                "room_id": room_id,
+                "reason": "host_left",
+                "message": f"房主 {st.host_nickname} 已退出，房间已关闭",
+            })
+
+        # 广播房间关闭消息给所有在线玩家（让他们从房间列表中移除该房间）
+        self.node.broadcast({
+            "type": "room_close",
+            "room_id": room_id,
+            "reason": "host_left",
+            "message": f"房主 {st.host_nickname} 已退出，房间已关闭",
+        })
+
+        # 清理本地房间数据
+        with self._lock:
+            self._host_rooms.pop(room_id, None)
             self.rooms.pop(room_id, None)
             self._games.pop(room_id, None)
             self._colors.pop(room_id, None)
-        if st is None:
-            return
-        self._broadcast_room(room_id, {"type": "room_close", "room_id": room_id})
         self._emit("rooms", {})
         self._emit("room_left", {"room_id": room_id, "host_closed": True})
 
@@ -731,6 +842,8 @@ class Core:
         peers = {p.peer_id for p in self.node.peers_snapshot()}
         removed: list[str] = []
         changed_host_rooms: list[tuple[str, dict[str, object]]] = []
+        game_reset_rooms: list[str] = []
+        opponent_left_alerts: list[tuple[str, str]] = []  # (room_id, nickname)
         with self._lock:
             for rid, r in list(self.rooms.items()):
                 if r.host_peer_id == self.peer_id:
@@ -739,16 +852,24 @@ class Core:
                     removed.append(rid)
                     del self.rooms[rid]
             for rid, st in list(self._host_rooms.items()):
-                if st.status != "waiting":
-                    continue
                 dirty = False
-                if st.player2_peer_id and st.player2_peer_id not in peers:
-                    old = st.player2_peer_id
-                    st.player2_peer_id = None
-                    st.player2_nickname = None
-                    st.ready.pop(old, None)
-                    st.nicknames.pop(old, None)
+                # 处理 B 方玩家离线
+                stale_team_b = [pid for pid in st.team_b if pid not in peers]
+                for pid in stale_team_b:
+                    old_nickname = st.nicknames.get(pid, pid[:6])
+                    st.remove_player(pid)
                     dirty = True
+                
+                # 检查 B 方是否全部离线
+                if stale_team_b and len(st.team_b) == 0:
+                    # 如果游戏进行中，需要重置游戏
+                    if st.status == "playing":
+                        st.status = "waiting"
+                        game_reset_rooms.append(rid)
+                        # 记录需要通知房主的信息
+                        opponent_left_alerts.append((rid, old_nickname))
+
+                # 处理观战者离线
                 stale_specs = [s for s in st.spectators if s not in peers]
                 for s in stale_specs:
                     st.spectators.discard(s)
@@ -759,12 +880,32 @@ class Core:
                 if dirty:
                     st.updated_ms = now_ms()
                     changed_host_rooms.append((rid, st.participants()))
+
+        # 清理游戏状态
+        for rid in game_reset_rooms:
+            with self._lock:
+                self._games.pop(rid, None)
+                self._colors.pop(rid, None)
+
         if removed:
             self._emit("rooms", {})
+        
+        # 先广播房间状态（确保 participants 更新）
         for rid, parts in changed_host_rooms:
             self._announce_room(rid)
             self._broadcast_room(rid, {"type": "room_state", "room_id": rid, "participants": parts})
             self._emit("room_state", {"room_id": rid, "participants": parts})
+        
+        # 然后刷新游戏状态和显示弹窗
+        for rid in game_reset_rooms:
+            self._emit("game_state", {"room_id": rid})
+        
+        # 最后发送弹窗提示
+        for rid, nickname in opponent_left_alerts:
+            self._emit("opponent_left_alert", {
+                "room_id": rid,
+                "message": f"对手 {nickname} 已离线，游戏结束",
+            })
 
     def _emit(self, etype: str, payload: dict[str, Any]) -> None:
         try:

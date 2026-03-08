@@ -251,9 +251,9 @@ class GameScreen(ttk.Frame):
         if self.role == "spectator":
             self.note.configure(text="你正在观战。")
         elif self.role == "player2":
-            self.note.configure(text="你是玩家二，点击准备后等待房主开始对弈。")
+            self.note.configure(text="你是玩家二，点击准备后等待房主开始对战。")
         else:
-            self.note.configure(text="仅当玩家二已准备，才可开始对弈。")
+            self.note.configure(text="仅当玩家二已准备，才可开始对战。")
         if hasattr(self.app, "_sync_game_header_actions"):
             try:
                 getattr(self.app, "_sync_game_header_actions")()
@@ -400,7 +400,7 @@ class GameScreen(ttk.Frame):
         p2 = str(self._participants.get("player2_peer_id", "")) if self._participants.get("player2_peer_id") else ""
         can_start = bool(self.role == "host" and p2 and isinstance(ready, dict) and ready.get(p2))
         if not can_start:
-            self.app.toast.show("玩家二准备后才可开始对弈")
+            self.app.toast.show("玩家二准备后才可开始对战")
             return
         self.app.core.start_game(self.room_id)
 

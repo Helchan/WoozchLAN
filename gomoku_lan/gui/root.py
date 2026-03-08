@@ -33,27 +33,14 @@ class RootWindow:
         self._sub = ttk.Label(self._header, text="LAN • P2P • 即开即用", style="SubTitle.TLabel")
         self._sub.pack(side=tk.LEFT, padx=(10, 0), pady=(6, 0))
 
-        self._lobby_room_actions = ttk.Frame(self._header)
-        self._lobby_create_btn = ttk.Button(self._lobby_room_actions, text="创建房间", style="Primary.TButton", command=self._on_lobby_create)
-        self._lobby_create_btn.pack(side=tk.LEFT)
-        self._lobby_join_btn = ttk.Button(self._lobby_room_actions, text="加入对战", command=self._on_lobby_join, state=tk.DISABLED)
-        self._lobby_join_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self._lobby_watch_btn = ttk.Button(self._lobby_room_actions, text="观战", command=self._on_lobby_watch, state=tk.DISABLED)
-        self._lobby_watch_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-        self._lobby_nick_actions = ttk.Frame(self._header)
+        # 大厅操作按钮和昵称控件的回调（由 lobby 屏幕调用）
         self._nick_var = tk.StringVar(value=self.core.nickname)
-        self._nick_entry = ttk.Entry(self._lobby_nick_actions, textvariable=self._nick_var, width=16, style="Nick.TEntry")
-        self._nick_entry.pack(side=tk.LEFT)
-        self._nick_entry.bind("<Return>", lambda _e: self._commit_nickname())
-        self._nick_btn = ttk.Button(self._lobby_nick_actions, text="修改昵称", style="Primary.TButton", command=self._commit_nickname)
-        self._nick_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self._game_actions = ttk.Frame(self._header)
         self._game_ready_btn = ttk.Button(self._game_actions, text="准备", style="Primary.TButton", command=self._on_header_ready)
-        self._game_ready_btn.pack(side=tk.LEFT, padx=(0, 10))
-        self._game_start_btn = ttk.Button(self._game_actions, text="开始对弈", style="Primary.TButton", command=self._on_header_start)
-        self._game_start_btn.pack(side=tk.LEFT, padx=(0, 10))
+        # 不在这里 pack，由 _sync_game_header_actions 控制
+        self._game_start_btn = ttk.Button(self._game_actions, text="开始对战", style="Primary.TButton", command=self._on_header_start)
+        # 不在这里 pack，由 _sync_game_header_actions 控制
         self._game_back_btn = ttk.Button(self._game_actions, text="返回大厅", command=self._on_header_back)
         self._game_back_btn.pack(side=tk.LEFT)
 
@@ -116,19 +103,14 @@ class RootWindow:
         self._sub.configure(text="")
 
     def _sync_game_header_actions(self) -> None:
+        lobby: LobbyScreen = self.screens["lobby"]  # type: ignore[assignment]
         if self._current == "lobby":
             if self._game_actions.winfo_manager():
                 self._game_actions.pack_forget()
-            if not self._lobby_nick_actions.winfo_manager():
-                self._lobby_nick_actions.pack(side=tk.RIGHT)
-            if not self._lobby_room_actions.winfo_manager():
-                self._lobby_room_actions.pack(side=tk.RIGHT, padx=(10, 0))
             self._sync_lobby_header_actions()
             return
-        if self._lobby_nick_actions.winfo_manager():
-            self._lobby_nick_actions.pack_forget()
-        if self._lobby_room_actions.winfo_manager():
-            self._lobby_room_actions.pack_forget()
+        # 非大厅界面时，隐藏 lobby 的按钮
+        lobby.hide_actions()
         if self._current != "game":
             if self._game_actions.winfo_manager():
                 self._game_actions.pack_forget()
@@ -136,19 +118,42 @@ class RootWindow:
         if not self._game_actions.winfo_manager():
             self._game_actions.pack(side=tk.RIGHT)
         game: GameScreen = self.screens["game"]  # type: ignore[assignment]
-        if game.can_toggle_ready():
-            if not self._game_ready_btn.winfo_manager():
-                self._game_ready_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._game_back_btn)
-            self._game_ready_btn.configure(text=game.ready_button_text(), state=tk.NORMAL)
-        else:
+        
+        # 检查游戏是否正在进行中
+        game_in_progress = False
+        if game.room_id:
+            game_obj = getattr(self.core, "_games", {}).get(game.room_id)
+            game_in_progress = game_obj is not None
+        
+        if game.role == "host":
+            # 房主：只显示"开始对战"按钮
             if self._game_ready_btn.winfo_manager():
                 self._game_ready_btn.pack_forget()
-        if game.role == "host":
             if not self._game_start_btn.winfo_manager():
                 self._game_start_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._game_back_btn)
-            state = tk.NORMAL if game.can_start_game() else tk.DISABLED
-            self._game_start_btn.configure(state=state)
+            if game_in_progress:
+                # 游戏进行中：显示灰色"对战中"
+                self._game_start_btn.configure(text="对战中", state=tk.DISABLED)
+            else:
+                # 等待中：根据条件启用/禁用"开始对战"
+                state = tk.NORMAL if game.can_start_game() else tk.DISABLED
+                self._game_start_btn.configure(text="开始对战", state=state)
+        elif game.role == "player2":
+            # 玩家二：只显示"准备"按钮
+            if self._game_start_btn.winfo_manager():
+                self._game_start_btn.pack_forget()
+            if not self._game_ready_btn.winfo_manager():
+                self._game_ready_btn.pack(side=tk.LEFT, padx=(0, 10), before=self._game_back_btn)
+            if game_in_progress:
+                # 游戏进行中：显示灰色"对战中"
+                self._game_ready_btn.configure(text="对战中", state=tk.DISABLED)
+            else:
+                # 等待中：显示"准备"/"取消准备"
+                self._game_ready_btn.configure(text=game.ready_button_text(), state=tk.NORMAL)
         else:
+            # 观战者：隐藏所有操作按钮
+            if self._game_ready_btn.winfo_manager():
+                self._game_ready_btn.pack_forget()
             if self._game_start_btn.winfo_manager():
                 self._game_start_btn.pack_forget()
 
@@ -158,8 +163,8 @@ class RootWindow:
         lobby: LobbyScreen = self.screens["lobby"]  # type: ignore[assignment]
         can_join = lobby.can_join_selected()
         can_watch = lobby.can_watch_selected()
-        self._lobby_join_btn.configure(state=(tk.NORMAL if can_join else tk.DISABLED))
-        self._lobby_watch_btn.configure(state=(tk.NORMAL if can_watch else tk.DISABLED))
+        lobby.set_join_button_state(tk.NORMAL if can_join else tk.DISABLED)
+        lobby.set_watch_button_state(tk.NORMAL if can_watch else tk.DISABLED)
 
     def _commit_nickname(self) -> None:
         if self._current != "lobby":
@@ -173,24 +178,6 @@ class RootWindow:
         self.persistent_settings = Settings(peer_id=self.persistent_settings.peer_id, nickname=nick)
         save_settings(self.persistent_settings)
         self.toast.show("昵称已更新")
-
-    def _on_lobby_create(self) -> None:
-        if self._current != "lobby":
-            return
-        lobby: LobbyScreen = self.screens["lobby"]  # type: ignore[assignment]
-        lobby.create_room_from_header()
-
-    def _on_lobby_join(self) -> None:
-        if self._current != "lobby":
-            return
-        lobby: LobbyScreen = self.screens["lobby"]  # type: ignore[assignment]
-        lobby.join_selected_from_header()
-
-    def _on_lobby_watch(self) -> None:
-        if self._current != "lobby":
-            return
-        lobby: LobbyScreen = self.screens["lobby"]  # type: ignore[assignment]
-        lobby.watch_selected_from_header()
 
     def _on_header_ready(self) -> None:
         if self._current != "game":
@@ -211,6 +198,80 @@ class RootWindow:
         game: GameScreen = self.screens["game"]  # type: ignore[assignment]
         game._back()
 
+    def _show_room_closed_alert(self, message: str) -> None:
+        """显示房间关闭弹窗，关闭后返回大厅"""
+        win = tk.Toplevel(self.root)
+        win.title("房间已关闭")
+        win.configure(bg="#0b1220")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        body = ttk.Frame(win, style="Card.TFrame")
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ttk.Label(body, text=message, style="TLabel", wraplength=300).pack(pady=(0, 16))
+
+        def on_close() -> None:
+            win.destroy()
+            self.show("lobby")
+
+        ttk.Button(body, text="返回大厅", style="Primary.TButton", command=on_close).pack()
+
+        # 居中显示
+        win.update_idletasks()
+        w = win.winfo_width()
+        h = win.winfo_height()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        x = rx + (rw - w) // 2
+        y = ry + (rh - h) // 2
+        win.geometry(f"+{x}+{y}")
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+    def _show_opponent_left_alert(self, message: str) -> None:
+        """显示对手退出弹窗（房主看到），关闭后留在房间"""
+        # 先刷新游戏界面（确保棋盘重置）
+        if self._current == "game":
+            game: GameScreen = self.screens["game"]  # type: ignore[assignment]
+            game.refresh()
+            self._sync_game_header_actions()
+            self.root.update_idletasks()  # 强制更新 UI
+        
+        win = tk.Toplevel(self.root)
+        win.title("对手已退出")
+        win.configure(bg="#0b1220")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        body = ttk.Frame(win, style="Card.TFrame")
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ttk.Label(body, text=message, style="TLabel", wraplength=300).pack(pady=(0, 16))
+
+        def on_close() -> None:
+            win.destroy()
+
+        ttk.Button(body, text="确定", style="Primary.TButton", command=on_close).pack()
+
+        # 居中显示
+        win.update_idletasks()
+        w = win.winfo_width()
+        h = win.winfo_height()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        x = rx + (rw - w) // 2
+        y = ry + (rh - h) // 2
+        win.geometry(f"+{x}+{y}")
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
     def _on_core_event(self, ev: CoreEvent) -> None:
         self.root.after(0, lambda: self._on_core_event_ui(ev))
 
@@ -224,7 +285,8 @@ class RootWindow:
             lobby.set_peers(items)
             return
         if ev.type == "nickname_changed":
-            self._nick_var.set(str(ev.payload.get("nickname", "")) or self.core.nickname)
+            nick = str(ev.payload.get("nickname", "")) or self.core.nickname
+            self._nick_var.set(nick)
             return
         if ev.type == "rooms":
             now = now_ms()
@@ -263,6 +325,21 @@ class RootWindow:
                 self._room_participants_by_id.pop(rid, None)
             self.show("lobby")
             return
+        if ev.type == "room_closed_alert":
+            rid = str(ev.payload.get("room_id", ""))
+            message = str(ev.payload.get("message", "")) or "房间已关闭"
+            if rid:
+                self._room_role_by_id.pop(rid, None)
+                self._room_chat.pop(rid, None)
+                self._room_participants_by_id.pop(rid, None)
+            # 显示弹窗提醒，关闭后返回大厅
+            self._show_room_closed_alert(message)
+            return
+        if ev.type == "opponent_left_alert":
+            # B 方全部退出时的弹窗提示（房主看到）
+            message = str(ev.payload.get("message", "")) or "对手已退出"
+            self._show_opponent_left_alert(message)
+            return
         if ev.type == "room_state":
             rid = str(ev.payload.get("room_id", ""))
             participants = ev.payload.get("participants")
@@ -278,7 +355,12 @@ class RootWindow:
             self.toast.show(str(ev.payload.get("text", "")) or "提示")
             return
         if ev.type == "game_started":
-            self.show("game", **ev.payload)
+            # 保留当前的 role，不要被重置为 spectator
+            rid = str(ev.payload.get("room_id", ""))
+            payload = dict(ev.payload)
+            if rid and rid in self._room_role_by_id:
+                payload["role"] = self._room_role_by_id[rid]
+            self.show("game", **payload)
             return
         if ev.type == "game_state":
             game: GameScreen = self.screens["game"]  # type: ignore[assignment]
@@ -374,9 +456,41 @@ class RootWindow:
             "Primary.TButton",
             background=[("active", "#16a34a"), ("disabled", "#14532d")],
         )
+        # 面板内紧凑型按钮样式
+        style.configure(
+            "Small.TButton",
+            padding=(8, 3),
+            font=("Helvetica", 11),
+            background=border,
+            foreground=fg,
+        )
+        style.map(
+            "Small.TButton",
+            background=[("active", "#243252")],
+        )
+        style.configure(
+            "SmallPrimary.TButton",
+            padding=(8, 3),
+            font=("Helvetica", 11),
+            background=accent,
+            foreground="#052e16",
+        )
+        style.map(
+            "SmallPrimary.TButton",
+            background=[("active", "#16a34a"), ("disabled", "#14532d")],
+        )
         style.configure(
             "Nick.TEntry",
             padding=(10, 8),
+            fieldbackground=panel,
+            foreground=fg,
+            insertcolor=fg,
+        )
+        # 面板内紧凑型输入框样式
+        style.configure(
+            "SmallNick.TEntry",
+            padding=(6, 3),
+            font=("Helvetica", 11),
             fieldbackground=panel,
             foreground=fg,
             insertcolor=fg,

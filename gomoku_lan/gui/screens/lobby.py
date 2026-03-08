@@ -28,6 +28,16 @@ class LobbyScreen(ttk.Frame):
 
         ttk.Label(top, text="大厅 / 房间列表", style="SubTitle.TLabel").pack(side=tk.LEFT)
 
+        # 房间操作按钮容器（右对齐，与大厅面板右边缘对齐）
+        room_actions = ttk.Frame(top, style="Card.TFrame")
+        room_actions.pack(side=tk.RIGHT)
+        self._create_btn = ttk.Button(room_actions, text="创建房间", style="SmallPrimary.TButton", command=self._on_create)
+        self._create_btn.pack(side=tk.LEFT)
+        self._join_btn = ttk.Button(room_actions, text="加入对战", style="Small.TButton", command=self._on_join, state=tk.DISABLED)
+        self._join_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._watch_btn = ttk.Button(room_actions, text="观战", style="Small.TButton", command=self._on_watch, state=tk.DISABLED)
+        self._watch_btn.pack(side=tk.LEFT, padx=(6, 0))
+
         table = ttk.Frame(card, style="Card.TFrame")
         table.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
 
@@ -58,7 +68,22 @@ class LobbyScreen(ttk.Frame):
         peers_card = ttk.Frame(right, style="Card2.TFrame", width=peers_width)
         peers_card.pack(fill=tk.BOTH, expand=True)
         peers_card.pack_propagate(False)
-        ttk.Label(peers_card, text="在线用户", style="SubTitle.TLabel").pack(anchor=tk.W, padx=14, pady=(14, 10))
+
+        peers_top = ttk.Frame(peers_card, style="Card2.TFrame")
+        peers_top.pack(fill=tk.X, padx=14, pady=(14, 10))
+        ttk.Label(peers_top, text="在线用户", style="SubTitle.TLabel").pack(side=tk.LEFT)
+
+        # 昵称操作容器（右对齐，与在线用户面板右边缘对齐）
+        nick_actions = ttk.Frame(peers_top, style="Card2.TFrame")
+        nick_actions.pack(side=tk.RIGHT)
+        # 使用 app 的 _nick_var，确保昵称修改同步
+        self._nick_var = getattr(app, "_nick_var", None) or tk.StringVar(value=getattr(app.core, "nickname", "玩家"))
+        self._nick_entry = ttk.Entry(nick_actions, textvariable=self._nick_var, width=12, style="SmallNick.TEntry")
+        self._nick_entry.pack(side=tk.LEFT)
+        self._nick_entry.bind("<Return>", lambda _e: self._commit_nickname())
+        self._nick_btn = ttk.Button(nick_actions, text="修改昵称", style="SmallPrimary.TButton", command=self._commit_nickname)
+        self._nick_btn.pack(side=tk.LEFT, padx=(6, 0))
+
         self.peers = tk.Listbox(
             peers_card,
             bg="#0f1b33",
@@ -131,6 +156,32 @@ class LobbyScreen(ttk.Frame):
                 getattr(self.app, "_sync_game_header_actions")()
             except Exception:
                 pass
+
+    def set_join_button_state(self, state: str) -> None:
+        self._join_btn.configure(state=state)
+
+    def set_watch_button_state(self, state: str) -> None:
+        self._watch_btn.configure(state=state)
+
+    def hide_actions(self) -> None:
+        """非大厅界面时隐藏操作按钮（当前实现中按钮在面板内，无需额外操作）"""
+        pass
+
+    def _on_create(self) -> None:
+        self._create_room()
+
+    def _on_join(self) -> None:
+        self._join_selected("play")
+
+    def _on_watch(self) -> None:
+        self._join_selected("watch")
+
+    def _commit_nickname(self) -> None:
+        if hasattr(self.app, "_commit_nickname"):
+            nick = self._nick_var.get().strip()
+            if nick:
+                self._nick_var.set(nick)
+                getattr(self.app, "_commit_nickname")()
 
     def _game_name(self, game: str) -> str:
         return "五子棋" if game == "gomoku" else "未知游戏"
