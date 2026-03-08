@@ -11,8 +11,8 @@ class NodeTests(unittest.TestCase):
         q1: "queue.Queue[object]" = queue.Queue()
         q2: "queue.Queue[object]" = queue.Queue()
 
-        n1 = Node(NodeConfig(peer_id="n1", nickname="A"), on_event=q1.put, enable_discovery=False)
-        n2 = Node(NodeConfig(peer_id="n2", nickname="B"), on_event=q2.put, enable_discovery=False)
+        n1 = Node(NodeConfig(peer_id="n1", nickname="A", ip="127.0.0.1", udp_port=37020), on_event=q1.put, enable_discovery=False)
+        n2 = Node(NodeConfig(peer_id="n2", nickname="B", ip="127.0.0.1", udp_port=37021), on_event=q2.put, enable_discovery=False)
         n1.start()
         n2.start()
         try:
@@ -33,10 +33,11 @@ class NodeTests(unittest.TestCase):
             n2.stop()
 
     def test_probe_targets_include_cross_subnet_addresses(self) -> None:
-        targets = _probe_targets("10.235.96.8")
-        self.assertIn("255.255.255.255", targets)
-        self.assertIn("10.235.255.255", targets)
-        self.assertIn("10.255.255.255", targets)
+        targets = _probe_targets("10.235.96.8", 37020)
+        target_ips = [t[0] for t in targets]
+        self.assertIn("255.255.255.255", target_ips)
+        self.assertIn("10.235.255.255", target_ips)
+        self.assertIn("10.255.255.255", target_ips)
 
 
 if __name__ == "__main__":

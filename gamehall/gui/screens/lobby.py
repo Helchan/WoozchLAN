@@ -66,6 +66,7 @@ class LobbyScreen(ttk.Frame):
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
+        # 在线用户面板（上部）
         peers_card = ttk.Frame(right, style="Card2.TFrame", width=peers_width)
         peers_card.pack(fill=tk.BOTH, expand=True)
         peers_card.pack_propagate(False)
@@ -97,8 +98,147 @@ class LobbyScreen(ttk.Frame):
         )
         self.peers.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
 
+        # 节点列表管理区域（下部）
+        nodes_card = ttk.Frame(right, style="Card2.TFrame", width=peers_width, height=180)
+        nodes_card.pack(fill=tk.X, pady=(12, 0))
+        nodes_card.pack_propagate(False)
+
+        nodes_top = ttk.Frame(nodes_card, style="Card2.TFrame")
+        nodes_top.pack(fill=tk.X, padx=14, pady=(10, 8))
+        ttk.Label(nodes_top, text="节点列表", style="SubTitle.TLabel").pack(side=tk.LEFT)
+        ttk.Button(
+            nodes_top,
+            text="添加",
+            style="SmallPrimary.TButton",
+            command=self._on_add_node,
+        ).pack(side=tk.RIGHT)
+
+        # 本机节点信息显示
+        local_info_frame = ttk.Frame(nodes_card, style="Card2.TFrame")
+        local_info_frame.pack(fill=tk.X, padx=14, pady=(0, 6))
+        self._local_node_label = ttk.Label(
+            local_info_frame,
+            text="本机: 加载中...",
+            style="Hint.TLabel",
+        )
+        self._local_node_label.pack(anchor=tk.W)
+
+        nodes_list_frame = ttk.Frame(nodes_card, style="Card2.TFrame")
+        nodes_list_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+
+        self.nodes_list = tk.Listbox(
+            nodes_list_frame,
+            bg="#0f1b33",
+            fg="#e5e7eb",
+            highlightthickness=0,
+            relief="flat",
+            activestyle="none",
+            font=("Helvetica", 10),
+            height=4,
+        )
+        self.nodes_list.pack(fill=tk.BOTH, expand=True)
+
     def on_show(self, **_kwargs: object) -> None:
         self.set_rooms(list(getattr(self.app.core, "rooms", {}).values()))
+        self._refresh_network_nodes()
+
+    def _refresh_network_nodes(self) -> None:
+        """刷新节点列表显示"""
+        # 更新本机节点信息
+        local_node = getattr(self.app.core, "local_node", None)
+        if local_node:
+            ip = getattr(local_node, "ip", "")
+            udp_port = getattr(local_node, "udp_port", 0)
+            self._local_node_label.configure(text=f"本机: {ip}:{udp_port}")
+        
+        # 更新网络节点列表
+        self.nodes_list.delete(0, tk.END)
+        nodes = getattr(self.app.core, "network_nodes", [])
+        local_peer_id = getattr(local_node, "peer_id", "") if local_node else ""
+        for node in nodes:
+            peer_id = getattr(node, "peer_id", "")
+            ip = getattr(node, "ip", "")
+            udp_port = getattr(node, "udp_port", 0)
+            nick = getattr(node, "nickname", "")
+            # 跳过本机节点（已单独显示）
+            if peer_id == local_peer_id:
+                continue
+            display = f"{nick} " if nick else ""
+            display += f"{ip}:{udp_port}"
+            self.nodes_list.insert(tk.END, display)
+
+    def _on_add_node(self) -> None:
+        """添加节点对话框"""
+        win = tk.Toplevel(self)
+        win.title("添加节点")
+        win.configure(bg="#0b1220")
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+
+        body = ttk.Frame(win, style="Card.TFrame")
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+
+        ttk.Label(body, text="IP 地址", style="SubTitle.TLabel").pack(anchor=tk.W)
+        ip_var = tk.StringVar()
+        ip_entry = ttk.Entry(body, textvariable=ip_var, width=24, style="Nick.TEntry")
+        ip_entry.pack(fill=tk.X, pady=(8, 12))
+        ip_entry.focus_set()
+
+        ttk.Label(body, text="UDP 端口", style="SubTitle.TLabel").pack(anchor=tk.W)
+        port_var = tk.StringVar(value="37020")
+        port_entry = ttk.Entry(body, textvariable=port_var, width=24, style="Nick.TEntry")
+        port_entry.pack(fill=tk.X, pady=(8, 12))
+
+        # 状态提示
+        status_label = ttk.Label(body, text="", style="Hint.TLabel")
+        status_label.pack(anchor=tk.W, pady=(0, 8))
+
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill=tk.X)
+
+        def ok() -> None:
+            ip = ip_var.get().strip()
+            try:
+                port = int(port_var.get().strip())
+            except ValueError:
+                port = 0
+            if not ip or port <= 0 or port > 65535:
+                self.app.toast.show("请输入有效的 IP 和端口")
+                return
+            
+            # 显示测试中状态
+            status_label.configure(text="正在测试连接...")
+            win.update_idletasks()
+            
+            if hasattr(self.app.core, "add_network_node"):
+                # 调用 core 的方法，它会自动测试连通性
+                success, msg = self.app.core.add_network_node(ip, port)
+                if success:
+                    self._refresh_network_nodes()
+                    win.destroy()
+                    self.app.toast.show(msg)
+                else:
+                    status_label.configure(text=f"失败: {msg}")
+            else:
+                win.destroy()
+
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="添加", style="Primary.TButton", command=ok).pack(side=tk.RIGHT, padx=(0, 10))
+
+        # 居中显示
+        win.update_idletasks()
+        root = self.winfo_toplevel()
+        root.update_idletasks()
+        width = win.winfo_width()
+        height = win.winfo_height()
+        root_width = root.winfo_width()
+        root_height = root.winfo_height()
+        root_x = root.winfo_rootx()
+        root_y = root.winfo_rooty()
+        x = root_x + (root_width - width) // 2
+        y = root_y + (root_height - height) // 2
+        win.geometry(f"{width}x{height}+{x}+{y}")
 
     def set_peers(self, items: object) -> None:
         if not isinstance(items, list):

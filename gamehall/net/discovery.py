@@ -10,7 +10,7 @@ from typing import Callable
 from ..util import now_ms
 
 
-DISCOVERY_PORT = 37020
+DEFAULT_DISCOVERY_PORT = 37020
 DISCOVERY_MULTICAST_GROUP = "239.255.37.20"
 
 
@@ -18,6 +18,7 @@ DISCOVERY_MULTICAST_GROUP = "239.255.37.20"
 class Beacon:
     peer_id: str
     nickname: str
+    udp_port: int
     tcp_port: int
     ts_ms: int
 
@@ -25,10 +26,12 @@ class Beacon:
 class UdpDiscovery:
     def __init__(
         self,
+        udp_port: int,
         get_local_ip: Callable[[], str],
         beacon_factory: Callable[[], Beacon],
         on_beacon: Callable[[str, Beacon], None],
     ) -> None:
+        self._udp_port = udp_port
         self._get_local_ip = get_local_ip
         self._beacon_factory = beacon_factory
         self._on_beacon = on_beacon
@@ -37,6 +40,10 @@ class UdpDiscovery:
         self._rx_thread: threading.Thread | None = None
         self._tx_thread: threading.Thread | None = None
         self._sock: socket.socket | None = None
+
+    @property
+    def udp_port(self) -> int:
+        return self._udp_port
 
     def start(self) -> None:
         if self._sock is not None:
@@ -54,7 +61,7 @@ class UdpDiscovery:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         except OSError:
             pass
-        sock.bind(("", DISCOVERY_PORT))
+        sock.bind(("", self._udp_port))
         try:
             mreq = struct.pack("=4s4s", socket.inet_aton(DISCOVERY_MULTICAST_GROUP), socket.inet_aton("0.0.0.0"))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -77,6 +84,29 @@ class UdpDiscovery:
                 pass
         self._sock = None
 
+    def send_to(self, ip: str, port: int, beacon: Beacon | None = None) -> None:
+        """向指定地址发送 beacon（用于主动探测节点）"""
+        if self._sock is None:
+            return
+        if beacon is None:
+            beacon = self._beacon_factory()
+        payload = json.dumps(
+            {
+                "type": "beacon",
+                "peer_id": beacon.peer_id,
+                "nickname": beacon.nickname,
+                "udp_port": beacon.udp_port,
+                "tcp_port": beacon.tcp_port,
+                "ts_ms": now_ms(),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            self._sock.sendto(payload, (ip, port))
+        except OSError:
+            pass
+
     def _tx_loop(self) -> None:
         assert self._sock is not None
         while not self._stop.is_set():
@@ -87,15 +117,16 @@ class UdpDiscovery:
                     "type": "beacon",
                     "peer_id": beacon.peer_id,
                     "nickname": beacon.nickname,
+                    "udp_port": beacon.udp_port,
                     "tcp_port": beacon.tcp_port,
                     "ts_ms": now_ms(),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            for ip in _probe_targets(local_ip):
+            for target in _probe_targets(local_ip, self._udp_port):
                 try:
-                    self._sock.sendto(payload, (ip, DISCOVERY_PORT))
+                    self._sock.sendto(payload, target)
                 except OSError:
                     pass
             self._stop.wait(1.2)
@@ -121,37 +152,42 @@ class UdpDiscovery:
                 beacon = Beacon(
                     peer_id=str(msg.get("peer_id", "")),
                     nickname=str(msg.get("nickname", "")),
+                    udp_port=int(msg.get("udp_port", 0) or msg.get("tcp_port", 0)),
                     tcp_port=int(msg.get("tcp_port", 0)),
                     ts_ms=int(msg.get("ts_ms", 0)),
                 )
             except Exception:
                 continue
-            if not beacon.peer_id or beacon.tcp_port <= 0 or beacon.tcp_port > 65535:
+            if not beacon.peer_id or beacon.udp_port <= 0 or beacon.udp_port > 65535:
                 continue
             self._on_beacon(ip, beacon)
 
 
-def _probe_targets(local_ip: str) -> list[str]:
-    targets: list[str] = ["255.255.255.255", DISCOVERY_MULTICAST_GROUP, "127.0.0.1"]
+def _probe_targets(local_ip: str, local_port: int) -> list[tuple[str, int]]:
+    """生成广播目标地址列表"""
+    # 广播目标 IP
+    target_ips: list[str] = ["255.255.255.255", DISCOVERY_MULTICAST_GROUP, "127.0.0.1"]
     parts = local_ip.split(".")
     if len(parts) == 4 and all(p.isdigit() for p in parts):
         a, b, c, d = [int(p) for p in parts]
         if all(0 <= x <= 255 for x in (a, b, c, d)):
             if not local_ip.startswith("127."):
-                targets.append(local_ip)
-                targets.append(f"{a}.{b}.{c}.255")
-                targets.append(f"{a}.{b}.255.255")
+                target_ips.append(local_ip)
+                target_ips.append(f"{a}.{b}.{c}.255")
+                target_ips.append(f"{a}.{b}.255.255")
             if a == 10:
-                targets.append("10.255.255.255")
+                target_ips.append("10.255.255.255")
             elif a == 172 and 16 <= b <= 31:
-                targets.append("172.31.255.255")
+                target_ips.append("172.31.255.255")
             elif a == 192 and b == 168:
-                targets.append("192.168.255.255")
+                target_ips.append("192.168.255.255")
+
+    # 去重并生成 (ip, port) 元组
     seen: set[str] = set()
-    deduped: list[str] = []
-    for ip in targets:
+    targets: list[tuple[str, int]] = []
+    for ip in target_ips:
         if ip in seen:
             continue
         seen.add(ip)
-        deduped.append(ip)
-    return deduped
+        targets.append((ip, local_port))
+    return targets

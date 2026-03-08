@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable
@@ -8,6 +9,7 @@ from .game import GameRegistry
 from .model.game import GameStateWrapper
 from .model.room import RoomHostState, RoomSummary
 from .net.node import Node, NodeConfig, NodeEvent
+from .storage import NetworkNode, save_settings, LocalNode, update_network_node
 from .util import new_id, now_ms
 
 
@@ -18,17 +20,25 @@ class CoreEvent:
 
 
 class Core:
-    def __init__(self, peer_id: str, nickname: str, on_event: Callable[[CoreEvent], None]) -> None:
+    def __init__(
+        self,
+        node_cfg: NodeConfig,
+        local_node: LocalNode,
+        network_nodes: list[NetworkNode],
+        on_event: Callable[[CoreEvent], None],
+    ) -> None:
         self._on_event = on_event
+        self._local_node = local_node
+        self._network_nodes = network_nodes
 
-        self.node = Node(NodeConfig(peer_id=peer_id, nickname=nickname), on_event=self._on_node_event)
+        self.node = Node(node_cfg, on_event=self._on_node_event)
         self._lock = threading.Lock()
 
         self.rooms: dict[str, RoomSummary] = {}
         self._host_rooms: dict[str, RoomHostState] = {}
         self._active_room_id: str | None = None
 
-        self._known_nicknames: dict[str, str] = {peer_id: nickname}
+        self._known_nicknames: dict[str, str] = {node_cfg.peer_id: node_cfg.nickname}
 
         # 使用 GameStateWrapper 管理游戏状态（通用化）
         self._games: dict[str, GameStateWrapper] = {}
@@ -981,3 +991,122 @@ class Core:
             self._on_event(CoreEvent(type=etype, payload=payload))
         except Exception:
             pass
+
+    @property
+    def local_node(self) -> LocalNode:
+        """获取本机节点信息"""
+        return self._local_node
+
+    @property
+    def network_nodes(self) -> list[NetworkNode]:
+        """获取网络节点列表"""
+        return list(self._network_nodes)
+
+    def test_node_connectivity(self, ip: str, udp_port: int, timeout: float = 2.0) -> bool:
+        """
+        测试节点 UDP 连通性。
+        发送一个 beacon 并等待响应。
+        """
+        if self.node._discovery is None:
+            return False
+        try:
+            # 创建一个临时 socket 发送探测包
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_sock.settimeout(timeout)
+            test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # 发送 beacon
+            self.node._discovery.send_to(ip, udp_port)
+            
+            # 等待一段时间看是否能收到响应
+            # 由于响应会被主接收线程处理，这里只是简单等待
+            import time
+            time.sleep(0.5)
+            
+            # 检查是否已经在 peers 列表中（说明收到了响应）
+            for p in self.node.peers_snapshot():
+                if p.ip == ip:
+                    return True
+            
+            # 再发一次探测，等待更长时间
+            self.node._discovery.send_to(ip, udp_port)
+            time.sleep(1.0)
+            
+            for p in self.node.peers_snapshot():
+                if p.ip == ip:
+                    return True
+            
+            return False
+        except Exception:
+            return False
+
+    def add_network_node(self, ip: str, udp_port: int, nickname: str = "") -> tuple[bool, str]:
+        """
+        添加网络节点。先测试连通性，成功后添加到列表并持久化。
+        返回 (成功与否, 提示消息)
+        """
+        # 检查是否已存在
+        for n in self._network_nodes:
+            if n.ip == ip and n.udp_port == udp_port:
+                return False, "该节点已存在"
+        
+        # 测试连通性
+        if not self.test_node_connectivity(ip, udp_port):
+            return False, f"无法连接到 {ip}:{udp_port}"
+        
+        # 获取远程节点的信息（如果能从 peers 中找到）
+        remote_peer_id = ""
+        remote_nickname = nickname
+        for p in self.node.peers_snapshot():
+            if p.ip == ip:
+                remote_peer_id = p.peer_id
+                remote_nickname = p.nickname or nickname
+                break
+        
+        if not remote_peer_id:
+            remote_peer_id = f"unknown_{ip}_{udp_port}"
+        
+        # 创建新节点
+        new_node = NetworkNode(
+            peer_id=remote_peer_id,
+            nickname=remote_nickname or f"节点@{ip}",
+            ip=ip,
+            udp_port=udp_port,
+        )
+        
+        # 添加到列表
+        self._network_nodes = update_network_node(self._network_nodes, new_node)
+        
+        # 持久化
+        self._save_settings()
+        
+        # 触发事件
+        self._emit("network_nodes_changed", {})
+        
+        return True, f"已添加节点 {remote_nickname or ip}"
+
+    def _save_settings(self) -> None:
+        """保存配置到文件"""
+        save_settings(self._local_node, self._network_nodes)
+
+    def update_local_node(self, local_node: LocalNode) -> None:
+        """更新本地节点信息并保存"""
+        self._local_node = local_node
+        self._save_settings()
+
+    def sync_network_nodes_from_peers(self) -> None:
+        """
+        从当前连接的 peers 同步到 network_nodes 列表。
+        只添加新发现的节点，不删除已有节点。
+        """
+        changed = False
+        for p in self.node.peers_snapshot():
+            # 检查是否已存在
+            exists = any(n.peer_id == p.peer_id for n in self._network_nodes)
+            if not exists:
+                # 需要知道远程节点的 UDP 端口，但 PeerInfo 中是 TCP 端口
+                # 暂时跳过自动同步，因为我们无法确定远程 UDP 端口
+                pass
+        if changed:
+            self._save_settings()
+            self._emit("network_nodes_changed", {})

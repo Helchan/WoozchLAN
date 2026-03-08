@@ -5,8 +5,15 @@ from tkinter import ttk
 
 from ..core import Core, CoreEvent
 from ..game import GameRegistry
-from ..storage import Settings, allocate_runtime_settings, load_settings, save_settings
-from ..util import now_ms
+from ..storage import (
+    LocalNode,
+    NetworkNode,
+    load_settings,
+    save_settings,
+    init_local_node,
+    ensure_local_node_in_network,
+)
+from ..util import allocate_udp_port, guess_local_ip, now_ms
 from .screens.game import GameScreen
 from .screens.lobby import LobbyScreen
 from .widgets import StatusTicker, Toast
@@ -21,9 +28,58 @@ class RootWindow:
 
         self._apply_theme()
 
-        self.persistent_settings: Settings = load_settings()
-        runtime_settings, self._runtime_ephemeral = allocate_runtime_settings(self.persistent_settings)
-        self.core = Core(peer_id=runtime_settings.peer_id, nickname=runtime_settings.nickname, on_event=self._on_core_event)
+        # 加载配置
+        loaded_local, network_nodes = load_settings()
+        current_ip = guess_local_ip()
+        
+        if loaded_local is None or loaded_local.ip != current_ip:
+            # 新用户或 IP 变化：初始化本机节点
+            local_node = init_local_node(current_ip)
+        else:
+            # 同一用户：保持 peer_id 和 nickname
+            local_node = loaded_local
+        
+        # 分配 UDP 端口（从配置中的端口开始尝试）
+        udp_port = allocate_udp_port(local_node.udp_port)
+        if udp_port != local_node.udp_port:
+            local_node = LocalNode(
+                peer_id=local_node.peer_id,
+                nickname=local_node.nickname,
+                ip=current_ip,
+                udp_port=udp_port,
+            )
+        elif local_node.ip != current_ip:
+            local_node = LocalNode(
+                peer_id=local_node.peer_id,
+                nickname=local_node.nickname,
+                ip=current_ip,
+                udp_port=local_node.udp_port,
+            )
+        
+        # 确保 local_node 在 network_nodes 中
+        network_nodes = ensure_local_node_in_network(local_node, network_nodes)
+        
+        # 保存配置
+        save_settings(local_node, network_nodes)
+        
+        self._local_node = local_node
+        self._network_nodes = network_nodes
+
+        # 创建 NodeConfig
+        from ..net.node import NodeConfig
+        node_cfg = NodeConfig(
+            peer_id=local_node.peer_id,
+            nickname=local_node.nickname,
+            ip=local_node.ip,
+            udp_port=local_node.udp_port,
+            network_nodes=network_nodes,
+        )
+        self.core = Core(
+            node_cfg=node_cfg,
+            local_node=local_node,
+            network_nodes=network_nodes,
+            on_event=self._on_core_event,
+        )
 
         self._header = ttk.Frame(self.root)
         self._header.pack(fill=tk.X, padx=18, pady=(18, 12))
@@ -177,8 +233,17 @@ class RootWindow:
             return
         self._nick_var.set(nick)
         self.core.set_nickname(nick)
-        self.persistent_settings = Settings(peer_id=self.persistent_settings.peer_id, nickname=nick)
-        save_settings(self.persistent_settings)
+        
+        # 更新本地节点信息并保存
+        self._local_node = LocalNode(
+            peer_id=self._local_node.peer_id,
+            nickname=nick,
+            ip=self._local_node.ip,
+            udp_port=self._local_node.udp_port,
+        )
+        # 更新 network_nodes 中的本机节点
+        self._network_nodes = ensure_local_node_in_network(self._local_node, self._network_nodes)
+        save_settings(self._local_node, self._network_nodes)
         self.toast.show("昵称已更新")
 
     def _on_header_ready(self) -> None:

@@ -2,112 +2,172 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
-try:
-    import fcntl  # type: ignore
-except Exception:
-    fcntl = None  # type: ignore
-
-try:
-    import msvcrt  # type: ignore
-except Exception:
-    msvcrt = None  # type: ignore
-
-from . import __version__
-from .util import get_data_dir, new_id
+from .util import get_app_root, guess_local_ip, new_id, now_ms
 
 
-@dataclass(frozen=True)
-class Settings:
+@dataclass
+class LocalNode:
+    """本机节点信息"""
     peer_id: str
     nickname: str
-    version: str = __version__
+    ip: str
+    udp_port: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "peer_id": self.peer_id,
+            "nickname": self.nickname,
+            "ip": self.ip,
+            "udp_port": self.udp_port,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LocalNode:
+        return cls(
+            peer_id=str(data.get("peer_id", "")).strip(),
+            nickname=str(data.get("nickname", "")).strip(),
+            ip=str(data.get("ip", "")).strip(),
+            udp_port=int(data.get("udp_port", 37020) or 37020),
+        )
 
 
-_lock_fds: list[int] = []
+@dataclass
+class NetworkNode:
+    """网络中的节点信息"""
+    peer_id: str
+    nickname: str
+    ip: str
+    udp_port: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "peer_id": self.peer_id,
+            "nickname": self.nickname,
+            "ip": self.ip,
+            "udp_port": self.udp_port,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> NetworkNode:
+        return cls(
+            peer_id=str(data.get("peer_id", "")).strip(),
+            nickname=str(data.get("nickname", "")).strip(),
+            ip=str(data.get("ip", "")).strip(),
+            udp_port=int(data.get("udp_port", 37020) or 37020),
+        )
+
+    def key(self) -> str:
+        return f"{self.ip}:{self.udp_port}"
 
 
-def _settings_path() -> str:
-    return os.path.join(get_data_dir("heyou"), "settings.json")
+def get_settings_path() -> str:
+    """返回程序根目录下的 settings.json 路径"""
+    return os.path.join(get_app_root(), "settings.json")
 
 
-def load_settings() -> Settings:
-    path = _settings_path()
+def load_settings() -> tuple[LocalNode | None, list[NetworkNode]]:
+    """
+    加载配置文件。
+    返回 (local_node, network_nodes)，如果配置文件不存在或格式错误，local_node 为 None。
+    """
+    path = get_settings_path()
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        peer_id = str(raw.get("peer_id", "")).strip()
-        nickname = str(raw.get("nickname", "")).strip()
-        version = str(raw.get("version", __version__)).strip()
-        if peer_id and nickname:
-            return Settings(peer_id=peer_id, nickname=nickname, version=version)
     except Exception:
-        pass
-    nick = f"玩家{new_id()[:4]}"
-    return Settings(peer_id=new_id(), nickname=nick, version=__version__)
+        return None, []
+
+    # 解析 local_node
+    local_data = raw.get("local_node")
+    local_node = None
+    if isinstance(local_data, dict):
+        peer_id = str(local_data.get("peer_id", "")).strip()
+        nickname = str(local_data.get("nickname", "")).strip()
+        if peer_id and nickname:
+            local_node = LocalNode.from_dict(local_data)
+
+    # 解析 network_nodes
+    network_nodes: list[NetworkNode] = []
+    nodes_data = raw.get("network_nodes", [])
+    if isinstance(nodes_data, list):
+        for item in nodes_data:
+            if not isinstance(item, dict):
+                continue
+            peer_id = str(item.get("peer_id", "")).strip()
+            ip = str(item.get("ip", "")).strip()
+            udp_port = int(item.get("udp_port", 0) or 0)
+            if peer_id and ip and udp_port > 0:
+                network_nodes.append(NetworkNode.from_dict(item))
+
+    return local_node, network_nodes
 
 
-def save_settings(s: Settings) -> None:
-    path = _settings_path()
+def save_settings(local_node: LocalNode, network_nodes: list[NetworkNode]) -> None:
+    """保存配置到 settings.json"""
+    path = get_settings_path()
     tmp = path + ".tmp"
-    payload = {"peer_id": s.peer_id, "nickname": s.nickname, "version": s.version}
+
+    payload = {
+        "local_node": local_node.to_dict(),
+        "network_nodes": [n.to_dict() for n in network_nodes],
+    }
+
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 
-def allocate_runtime_settings(base: Settings) -> tuple[Settings, bool]:
-    try:
-        base_dir = get_data_dir("heyou")
-        locks_dir = os.path.join(base_dir, "locks")
-        os.makedirs(locks_dir, exist_ok=True)
-    except Exception:
-        runtime_peer_id = new_id()
-        nick = base.nickname
-        if nick and "（" not in nick:
-            nick = f"{nick}（副本）"
-        return Settings(peer_id=runtime_peer_id, nickname=nick or base.nickname), True
-
-    def try_lock(pid: str) -> int | None:
-        path = os.path.join(locks_dir, f"peer-{pid}.lock")
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            elif msvcrt is not None:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                raise RuntimeError("no file lock implementation")
-            os.ftruncate(fd, 0)
-            os.write(fd, str(os.getpid()).encode("utf-8"))
-            return fd
-        except BlockingIOError:
-            os.close(fd)
-            return None
-        except OSError:
-            os.close(fd)
-            return None
-
-    fd = try_lock(base.peer_id)
-    if fd is not None:
-        _lock_fds.append(fd)
-        return base, False
-
-    runtime_peer_id = new_id()
-    fd2 = try_lock(runtime_peer_id)
-    if fd2 is not None:
-        _lock_fds.append(fd2)
-    nick = base.nickname
-    if nick and "（" not in nick:
-        nick = f"{nick}（副本）"
-    return Settings(peer_id=runtime_peer_id, nickname=nick or base.nickname), True
+def init_local_node(current_ip: str, preferred_port: int = 37020) -> LocalNode:
+    """
+    初始化新用户的本机节点。
+    生成新的 peer_id 和默认昵称。
+    """
+    peer_id = new_id()
+    nickname = f"玩家{peer_id[:4].upper()}"
+    return LocalNode(
+        peer_id=peer_id,
+        nickname=nickname,
+        ip=current_ip,
+        udp_port=preferred_port,
+    )
 
 
-def _release_runtime_locks_for_tests() -> None:
-    while _lock_fds:
-        fd = _lock_fds.pop()
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+def ensure_local_node_in_network(
+    local_node: LocalNode, network_nodes: list[NetworkNode]
+) -> list[NetworkNode]:
+    """
+    确保 local_node 在 network_nodes 中（根据 peer_id 匹配并更新）。
+    返回更新后的 network_nodes 列表。
+    """
+    # 移除旧的本机节点（如果存在）
+    filtered = [n for n in network_nodes if n.peer_id != local_node.peer_id]
+    # 添加最新的本机节点信息
+    filtered.insert(0, NetworkNode(
+        peer_id=local_node.peer_id,
+        nickname=local_node.nickname,
+        ip=local_node.ip,
+        udp_port=local_node.udp_port,
+    ))
+    return filtered
+
+
+def update_network_node(
+    network_nodes: list[NetworkNode], node: NetworkNode
+) -> list[NetworkNode]:
+    """
+    更新或添加节点到 network_nodes 列表。
+    如果 peer_id 已存在则更新，否则添加。
+    """
+    filtered = [n for n in network_nodes if n.peer_id != node.peer_id]
+    filtered.append(node)
+    return filtered
+
+
+def remove_network_node(
+    network_nodes: list[NetworkNode], peer_id: str
+) -> list[NetworkNode]:
+    """从 network_nodes 中移除指定 peer_id 的节点"""
+    return [n for n in network_nodes if n.peer_id != peer_id]

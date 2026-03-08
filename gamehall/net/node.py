@@ -17,6 +17,13 @@ from .protocol import decode_frames, encode_frame
 class NodeConfig:
     peer_id: str
     nickname: str
+    ip: str
+    udp_port: int
+    network_nodes: list[Any] = None
+
+    def __post_init__(self):
+        if self.network_nodes is None:
+            object.__setattr__(self, "network_nodes", [])
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,7 @@ class Node:
 
         if self._enable_discovery:
             self._discovery = UdpDiscovery(
+                udp_port=self.cfg.udp_port,
                 get_local_ip=lambda: self.local_ip,
                 beacon_factory=self._make_beacon,
                 on_beacon=self._on_beacon,
@@ -88,6 +96,25 @@ class Node:
                 "port": self.listen_addr.port,
             },
         )
+
+        self._probe_network_nodes()
+
+    def _probe_network_nodes(self) -> None:
+        """向配置中的网络节点发送 UDP 探测"""
+        if self._discovery is None:
+            return
+        nodes = getattr(self.cfg, "network_nodes", None) or []
+        for node in nodes:
+            try:
+                ip = str(getattr(node, "ip", "")).strip()
+                udp_port = int(getattr(node, "udp_port", 0) or 0)
+                # 跳过本机节点
+                if ip == self.local_ip and udp_port == self.cfg.udp_port:
+                    continue
+                if ip and udp_port > 0:
+                    self._discovery.send_to(ip, udp_port)
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self.broadcast({"type": "peer_offline", "peer_id": self.cfg.peer_id, "nickname": self.cfg.nickname})
@@ -108,7 +135,13 @@ class Node:
             c.close()
 
     def update_nickname(self, nickname: str) -> None:
-        self.cfg = NodeConfig(peer_id=self.cfg.peer_id, nickname=nickname)
+        self.cfg = NodeConfig(
+            peer_id=self.cfg.peer_id,
+            nickname=nickname,
+            ip=self.cfg.ip,
+            udp_port=self.cfg.udp_port,
+            network_nodes=self.cfg.network_nodes,
+        )
         self.broadcast({"type": "nickname_update", "peer_id": self.cfg.peer_id, "nickname": nickname})
         self._broadcast_peers()
 
@@ -215,6 +248,7 @@ class Node:
         return Beacon(
             peer_id=self.cfg.peer_id,
             nickname=self.cfg.nickname,
+            udp_port=self.cfg.udp_port,
             tcp_port=self.listen_addr.port,
             ts_ms=now_ms(),
         )

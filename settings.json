@@ -1,0 +1,16 @@
+{
+  "local_node": {
+    "peer_id": "063d770c7f9a49729de8d60a00f87e32",
+    "nickname": "玩家063D",
+    "ip": "192.168.3.44",
+    "udp_port": 37021
+  },
+  "network_nodes": [
+    {
+      "peer_id": "063d770c7f9a49729de8d60a00f87e32",
+      "nickname": "玩家063D",
+      "ip": "192.168.3.44",
+      "udp_port": 37021
+    }
+  ]
+}
