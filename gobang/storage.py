@@ -14,6 +14,7 @@ try:
 except Exception:
     msvcrt = None  # type: ignore
 
+from . import __version__
 from .util import get_data_dir, new_id
 
 
@@ -21,6 +22,7 @@ from .util import get_data_dir, new_id
 class Settings:
     peer_id: str
     nickname: str
+    version: str = __version__
 
 
 _lock_fds: list[int] = []
@@ -37,18 +39,19 @@ def load_settings() -> Settings:
             raw = json.load(f)
         peer_id = str(raw.get("peer_id", "")).strip()
         nickname = str(raw.get("nickname", "")).strip()
+        version = str(raw.get("version", __version__)).strip()
         if peer_id and nickname:
-            return Settings(peer_id=peer_id, nickname=nickname)
+            return Settings(peer_id=peer_id, nickname=nickname, version=version)
     except Exception:
         pass
     nick = f"玩家{new_id()[:4]}"
-    return Settings(peer_id=new_id(), nickname=nick)
+    return Settings(peer_id=new_id(), nickname=nick, version=__version__)
 
 
 def save_settings(s: Settings) -> None:
     path = _settings_path()
     tmp = path + ".tmp"
-    payload = {"peer_id": s.peer_id, "nickname": s.nickname}
+    payload = {"peer_id": s.peer_id, "nickname": s.nickname, "version": s.version}
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)

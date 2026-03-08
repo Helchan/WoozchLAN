@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import ttk
 from collections import deque
 
+from .. import __version__
+
 
 class Toast:
     def __init__(self, root: tk.Tk) -> None:
@@ -61,6 +63,7 @@ class StatusTicker(ttk.Frame):
         self._x = 0
         self._after: str | None = None
 
+        # 左侧滚动消息区域
         self._canvas = tk.Canvas(
             self,
             bg="#0b1220",
@@ -69,8 +72,18 @@ class StatusTicker(ttk.Frame):
             relief="flat",
             height=16,
         )
-        self._canvas.pack(fill=tk.X, expand=True, padx=10, pady=0)
+        self._canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0), pady=0)
         self._canvas.bind("<Configure>", self._on_resize)
+
+        # 右侧版本号标签
+        self._version_label = ttk.Label(
+            self,
+            text=f"v{__version__}",
+            style="Hint.TLabel",
+            font=("Helvetica", 9),
+            foreground="#64748b",
+        )
+        self._version_label.pack(side=tk.RIGHT, padx=(0, 10), pady=0)
 
     def push(self, text: str) -> None:
         t = text.strip()
