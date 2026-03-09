@@ -12,8 +12,9 @@ from ..storage import (
     save_settings,
     init_local_node,
     ensure_local_node_in_network,
+    generate_random_nickname,
 )
-from ..util import allocate_udp_port, guess_local_ip, now_ms
+from ..util import allocate_udp_port, guess_local_ip, new_id, now_ms
 from .screens.game import GameScreen
 from .screens.lobby import LobbyScreen
 from .widgets import StatusTicker, Toast
@@ -42,9 +43,11 @@ class RootWindow:
         # 分配 UDP 端口（从配置中的端口开始尝试）
         udp_port = allocate_udp_port(local_node.udp_port)
         if udp_port != local_node.udp_port:
+            # 端口变化：说明是拷贝的程序目录，生成新的 peer_id 和 nickname
+            # 这样不会覆盖原节点，而是作为新节点添加
             local_node = LocalNode(
-                peer_id=local_node.peer_id,
-                nickname=local_node.nickname,
+                peer_id=new_id(),
+                nickname=generate_random_nickname(),
                 ip=current_ip,
                 udp_port=udp_port,
             )

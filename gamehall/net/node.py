@@ -43,6 +43,7 @@ class Node:
         self.cfg = cfg
         self._on_event = on_event
         self._enable_discovery = enable_discovery
+        self._network_nodes: list[Any] = list(getattr(cfg, "network_nodes", None) or [])
 
         self.local_ip = guess_local_ip()
         self.listen_addr: Addr | None = None
@@ -57,6 +58,10 @@ class Node:
         self._peers_by_id: dict[str, PeerInfo] = {}
         self._outgoing_lock = threading.Lock()
         self._connections: dict[str, "PeerConn"] = {}
+
+    def update_network_nodes(self, nodes: list[Any]) -> None:
+        """更新 network_nodes 列表（用于动态同步新发现的节点）"""
+        self._network_nodes = list(nodes)
 
         self._tick_thread: threading.Thread | None = None
 
@@ -103,7 +108,7 @@ class Node:
         """向配置中的网络节点发送 UDP 探测"""
         if self._discovery is None:
             return
-        nodes = getattr(self.cfg, "network_nodes", None) or []
+        nodes = self._network_nodes
         for node in nodes:
             try:
                 ip = str(getattr(node, "ip", "")).strip()
@@ -230,6 +235,8 @@ class Node:
         while not self._stop.is_set():
             self._drop_stale_peers()
             self._broadcast_peers()
+            # 周期性向 network_nodes 发送探测，保持连接
+            self._probe_network_nodes()
             self._stop.wait(2.5)
 
     def _drop_stale_peers(self) -> None:
@@ -266,6 +273,7 @@ class Node:
                 peer_id=beacon.peer_id,
                 ip=ip,
                 port=beacon.tcp_port,
+                udp_port=beacon.udp_port,
                 nickname=beacon.nickname,
                 last_seen_ms=now_ms(),
             )
@@ -283,6 +291,7 @@ class Node:
                 "nickname": self.cfg.nickname,
                 "ip": self.local_ip,
                 "port": self.listen_addr.port,
+                "udp_port": self.cfg.udp_port,
             }
         )
         conn.send({"type": "peers", "items": self._peers_compact()})
@@ -298,7 +307,7 @@ class Node:
         with self._peers_lock:
             peers = list(self._peers_by_id.values())
         return [
-            {"peer_id": p.peer_id, "ip": p.ip, "port": p.port, "nickname": p.nickname, "last_seen_ms": p.last_seen_ms}
+            {"peer_id": p.peer_id, "ip": p.ip, "port": p.port, "udp_port": p.udp_port, "nickname": p.nickname, "last_seen_ms": p.last_seen_ms}
             for p in peers
         ]
 
@@ -310,6 +319,7 @@ class Node:
                 return
             ip = str(msg.get("ip", addr.ip))
             port = int(msg.get("port", 0) or 0)
+            udp_port = int(msg.get("udp_port", 0) or 0)
             nick = str(msg.get("nickname", ""))
             if port <= 0 or port > 65535:
                 return
@@ -318,6 +328,7 @@ class Node:
                     peer_id=pid,
                     ip=ip,
                     port=port,
+                    udp_port=udp_port,
                     nickname=nick or "玩家",
                     last_seen_ms=now_ms(),
                 )
@@ -338,6 +349,7 @@ class Node:
                     continue
                 ip = str(item.get("ip", ""))
                 port = int(item.get("port", 0) or 0)
+                udp_port = int(item.get("udp_port", 0) or 0)
                 nick = str(item.get("nickname", ""))
                 last_seen = int(item.get("last_seen_ms", 0) or 0)
                 if not ip or port <= 0 or port > 65535:
@@ -350,6 +362,7 @@ class Node:
                         peer_id=pid,
                         ip=ip,
                         port=port,
+                        udp_port=udp_port,
                         nickname=nick or "玩家",
                         last_seen_ms=max(now_ms(), last_seen),
                     )
@@ -371,6 +384,7 @@ class Node:
                             peer_id=existing.peer_id,
                             ip=existing.ip,
                             port=existing.port,
+                            udp_port=existing.udp_port,
                             nickname=nick,
                             last_seen_ms=now_ms(),
                         )

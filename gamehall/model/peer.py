@@ -7,7 +7,8 @@ from dataclasses import dataclass
 class PeerInfo:
     peer_id: str
     ip: str
-    port: int
+    port: int  # TCP 端口
+    udp_port: int  # UDP 端口（用于节点发现）
     nickname: str
     last_seen_ms: int
 

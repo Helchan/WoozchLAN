@@ -11,6 +11,12 @@
       "nickname": "玩家063D",
       "ip": "192.168.3.44",
       "udp_port": 37021
+    },
+    {
+      "peer_id": "0ffa97cc2f5c4e9098cd440a2cc5cd69",
+      "nickname": "活泼的孔雀",
+      "ip": "192.168.3.44",
+      "udp_port": 37022
     }
   ]
 }

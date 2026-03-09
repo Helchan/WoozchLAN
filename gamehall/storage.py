@@ -2,10 +2,37 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
 from .util import get_app_root, guess_local_ip, new_id, now_ms
+
+
+# 昵称生成词库（3字形容词 + 2字名词 = 5字）
+_NICKNAME_ADJECTIVES = [
+    "爱睡的", "偷懒的", "快乐的", "勤奋的", "淡定的",
+    "机智的", "呆萌的", "暴躁的", "佛系的", "社恐的",
+    "内卷的", "躺平的", "摸鱼的", "划水的", "奋斗的",
+    "安静的", "活泼的", "稳重的", "调皮的", "认真的",
+    "努力的", "热情的", "冷静的", "可爱的", "帅气的",
+    "温柔的", "霸气的", "低调的", "高冷的", "傲娇的",
+]
+
+_NICKNAME_NOUNS = [
+    "小猫", "小狗", "熊猫", "企鹅", "兔子",
+    "狐狸", "老虎", "狮子", "大象", "猴子",
+    "海豚", "鲸鱼", "小鸟", "蝴蝶", "蜜蜂",
+    "乌龟", "松鼠", "刺猬", "考拉", "袋鼠",
+    "河马", "长颈", "斑马", "孔雀", "天鹅",
+]
+
+
+def generate_random_nickname() -> str:
+    """生成随机昵称（形容词+名词，5个汉字）"""
+    adj = random.choice(_NICKNAME_ADJECTIVES)
+    noun = random.choice(_NICKNAME_NOUNS)
+    return adj + noun
 
 
 @dataclass

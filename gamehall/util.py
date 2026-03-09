@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import time
 import uuid
 from dataclasses import dataclass
+from typing import IO
+
+
+# 单例锁文件句柄，全局保持打开以维持锁
+_lock_file_handle: IO[str] | None = None
 
 
 def now_ms() -> int:
@@ -18,6 +24,86 @@ def new_id() -> str:
 def get_app_root() -> str:
     """获取程序根目录（gamehall 包的上级目录）"""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_lock_file_path() -> str:
+    """获取锁文件路径"""
+    return os.path.join(get_app_root(), ".heyou.lock")
+
+
+def acquire_instance_lock() -> bool:
+    """
+    尝试获取单例锁，防止同一程序目录下多开。
+    返回 True 表示成功获取锁，False 表示已有实例运行。
+    """
+    global _lock_file_handle
+    lock_path = get_lock_file_path()
+    
+    try:
+        # 打开或创建锁文件
+        _lock_file_handle = open(lock_path, "w", encoding="utf-8")
+        
+        # 尝试获取独占锁
+        if sys.platform == "win32":
+            # Windows
+            import msvcrt
+            try:
+                msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except IOError:
+                _lock_file_handle.close()
+                _lock_file_handle = None
+                return False
+        else:
+            # Unix/macOS
+            import fcntl
+            try:
+                fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # 写入 PID 以便调试
+                _lock_file_handle.write(str(os.getpid()))
+                _lock_file_handle.flush()
+                return True
+            except (IOError, OSError):
+                _lock_file_handle.close()
+                _lock_file_handle = None
+                return False
+    except Exception:
+        if _lock_file_handle:
+            try:
+                _lock_file_handle.close()
+            except Exception:
+                pass
+            _lock_file_handle = None
+        return False
+
+
+def release_instance_lock() -> None:
+    """释放单例锁"""
+    global _lock_file_handle
+    if _lock_file_handle is not None:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                try:
+                    msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            _lock_file_handle.close()
+        except Exception:
+            pass
+        _lock_file_handle = None
+        
+        # 尝试删除锁文件
+        try:
+            os.remove(get_lock_file_path())
+        except Exception:
+            pass
 
 
 def get_data_dir(app_name: str = "gobang") -> str:
